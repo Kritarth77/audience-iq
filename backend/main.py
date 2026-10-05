@@ -191,9 +191,10 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "https://audienceiq-one.vercel.app",
+        "https://audienceiq-one.vercel.app/",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
