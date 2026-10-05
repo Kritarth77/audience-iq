@@ -332,3 +332,11 @@ GET /health
 - Local data is intentionally realistic but not sourced from a social network.
 - Authentication and workspace persistence are outside the current frontend scope.
 - A future iteration can add typed API models, loading/skeleton states, explicit API error UI, pagination, richer content detail pages, and a dedicated charting library if the backend requires more complex visualizations.
+
+## Team
+
+This project was collaboratively developed by:
+
+- **Kritarth Bajpai**
+- **Arekh Vikram**
+- **Ayush Singh Rajput**
