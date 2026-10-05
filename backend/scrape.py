@@ -1,31 +1,28 @@
 #!/usr/bin/env python3
 """
-scrape.py - fetch recent Reddit posts via the public .json endpoints and
-write them to records.csv in the backend pipeline schema.
+scrape.py - search Reddit RSS feeds for brand mentions and write them to
+records.csv in the backend pipeline schema.
 
 Usage:
-    pip install requests
     python scrape.py
 """
 import csv
 import json
 import time
 import uuid
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-import requests
+from email.utils import parsedate_to_datetime
+from urllib.parse import quote_plus
 
 # ----------------------------- config ---------------------------------
-SUBREDDITS = ["technology", "startups", "finance", "cybersecurity"]
+SEARCH_KEYWORDS = ["Zomato", "Reliance Jio", "Tata Motors", "Flipkart", "Air India"]
 POSTS_PER_SUBREDDIT = 100          # Reddit caps a single page at 100
 OUTPUT_FILE = "records.csv"
 REQUEST_DELAY_SECONDS = 2          # be polite between subreddits
 MAX_RETRIES = 3
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-}
 
 COLUMNS = [
     "id", "platform", "target", "record_type", "external_id", "author_id",
@@ -35,24 +32,99 @@ COLUMNS = [
 BAD_TEXT = {"", "[removed]", "[deleted]"}
 
 # ----------------------------- helpers --------------------------------
-def fetch_subreddit(subreddit):
-    """Return the list of raw post dicts for r/<subreddit>/new."""
-    url = f"https://www.reddit.com/r/{subreddit}/new.json"
-    params = {"limit": POSTS_PER_SUBREDDIT, "raw_json": 1}
+def scrape_reddit_search(keyword, limit=25):
+    """Fetch and normalize recent Reddit posts matching a brand keyword."""
+
+    url = f"https://www.reddit.com/search.rss?q={quote_plus(keyword)}&sort=new"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            )
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            root = ET.fromstring(response.read())
+
+        atom_namespace = {"atom": "http://www.w3.org/2005/Atom"}
+        posts = []
+        for entry in root.findall("atom:entry", atom_namespace)[:limit]:
+            entry_id = entry.findtext("atom:id", default="", namespaces=atom_namespace)
+            title = entry.findtext("atom:title", default="", namespaces=atom_namespace)
+            content = entry.findtext(
+                "atom:content", default="", namespaces=atom_namespace
+            )
+            published = entry.findtext(
+                "atom:published", default="", namespaces=atom_namespace
+            )
+            author = entry.findtext(
+                "atom:author/atom:name",
+                default="",
+                namespaces=atom_namespace,
+            )
+            links = entry.findall("atom:link", atom_namespace)
+            permalink = next(
+                (
+                    link.attrib.get("href", "")
+                    for link in links
+                    if link.attrib.get("rel") == "alternate"
+                ),
+                "",
+            )
+            if not permalink:
+                permalink = next(
+                    (link.attrib.get("href", "") for link in links),
+                    "",
+                )
+
+            try:
+                created_utc = datetime.fromisoformat(
+                    published.replace("Z", "+00:00")
+                ).timestamp()
+            except (TypeError, ValueError, OverflowError):
+                try:
+                    created_utc = parsedate_to_datetime(published).timestamp()
+                except (TypeError, ValueError, OverflowError):
+                    created_utc = datetime.now(timezone.utc).timestamp()
+
+            post_id = entry_id.rsplit("/", 1)[-1] if entry_id else ""
+            if post_id.startswith("t3_"):
+                post_id = post_id[3:]
+            if not post_id:
+                continue
+
+            posts.append(
+                {
+                    "id": post_id,
+                    "title": title,
+                    "text": content,
+                    "author": author,
+                    "upvotes": 0,
+                    "created_utc": created_utc,
+                    "url": permalink,
+                    "permalink": permalink.replace("https://www.reddit.com", ""),
+                }
+            )
+        return posts
+    except (ET.ParseError, urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(f"  [search:{keyword}] request failed: {exc}")
+        return None
+
+
+def fetch_search(keyword):
+    """Return recent posts matching a keyword with retries."""
 
     for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
-            if resp.status_code == 429:  # rate limited -> back off and retry
-                wait = int(resp.headers.get("Retry-After", 5 * attempt))
-                print(f"  [r/{subreddit}] rate limited, waiting {wait}s...")
-                time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            children = resp.json().get("data", {}).get("children", [])
-            return [c["data"] for c in children if c.get("kind") == "t3"]
-        except (requests.RequestException, ValueError) as exc:
-            print(f"  [r/{subreddit}] attempt {attempt}/{MAX_RETRIES} failed: {exc}")
+        posts = scrape_reddit_search(keyword, POSTS_PER_SUBREDDIT)
+        if posts is not None:
+            return posts
+        print(f"  [search:{keyword}] attempt {attempt}/{MAX_RETRIES} failed")
+        if attempt < MAX_RETRIES:
             time.sleep(2 * attempt)
     return []
 
@@ -75,27 +147,32 @@ def build_text(post):
 
     return f"{title}\n\n{body}" if body else title
 
-def to_record(post, subreddit):
-    """Map a raw Reddit post to one CSV row (dict), or None to skip."""
+def to_record(post, keyword):
+    """Map a raw Reddit post and brand keyword to one CSV row."""
     text = build_text(post)
-    if text is None:
+    if text is None or not post.get("created_utc"):
         return None
 
-    external_id = post.get("name") or f"t3_{post['id']}"   # e.g. t3_abc123
+    external_id = post.get("id")
+    if not external_id:
+        return None
     return {
         "id": str(uuid.uuid4()),
         "platform": "reddit",
-        "target": subreddit,
+        "target": keyword,
         "record_type": "post",
         "external_id": external_id,
         "author_id": post["author"],
         "text": text,
-        "source_url": f"https://www.reddit.com{post['permalink']}",
+        "source_url": (
+            f"https://www.reddit.com{post['permalink']}"
+            if post.get("permalink")
+            else post.get("url", "")
+        ),
         "published_at": iso_utc(post["created_utc"]),
         "metadata": json.dumps(
             {
-                "score": post.get("score", 0),
-                "num_comments": post.get("num_comments", 0),
+                "score": post.get("upvotes", 0),
             },
             separators=(", ", ": "),
         ),
@@ -106,19 +183,19 @@ def to_record(post, subreddit):
 def main():
     rows, seen = [], set()
 
-    for i, sub in enumerate(SUBREDDITS):
-        print(f"Fetching r/{sub} ...")
-        posts = fetch_subreddit(sub)
+    for i, keyword in enumerate(SEARCH_KEYWORDS):
+        print(f"Searching Reddit for {keyword} ...")
+        posts = fetch_search(keyword)
         kept = 0
         for post in posts:
-            record = to_record(post, sub)
+            record = to_record(post, keyword)
             if record is None or record["dedup_key"] in seen:
                 continue
             seen.add(record["dedup_key"])
             rows.append(record)
             kept += 1
         print(f"  fetched {len(posts)}, kept {kept}")
-        if i < len(SUBREDDITS) - 1:
+        if i < len(SEARCH_KEYWORDS) - 1:
             time.sleep(REQUEST_DELAY_SECONDS)
 
     with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:

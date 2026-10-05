@@ -1,103 +1,86 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
+import { forceCollide, forceLink, forceManyBody } from 'd3-force'
 
-function createGraphData(network) {
+function createHubAndSpokeData(network) {
   if (!network?.nodes?.length) return { nodes: [], links: [] }
 
-  const nodes = network.nodes.map((node, index) => ({
-    ...node,
-    color: node.group === 'topic' ? '#f6c86e' : ['#a78bfa', '#5eead4', '#34d399', '#c084fc'][index % 4],
-    val: node.group === 'topic' && node.id === 'topic_center' ? 80 : 30,
-    ...(node.id === 'topic_center' ? { fx: 0, fy: 0 } : {}),
-  }))
+  const sourceNodes = network.nodes.filter(node => node.id !== 'topic_center')
+  const nodes = [
+    {
+      id: 'root',
+      name: 'Audience Topic',
+      val: 25,
+      color: '#FFBE0B',
+    },
+    ...sourceNodes.map((node, index) => ({
+      id: String(node.id || `mention_${index}`),
+      name: node.author
+        || node.text
+        || node.label
+        || `Mention ${index + 1}`,
+      val: 5,
+      color: '#0bdbb4',
+    })),
+  ]
+
   return {
     nodes,
-    links: (network.links || []).map((link) => ({ source: link.source, target: link.target })),
+    links: nodes
+      .slice(1)
+      .map(node => ({ source: 'root', target: node.id })),
   }
 }
 
 function drawNode(node, ctx, globalScale) {
   if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return
 
-  const isTopic = node.group === 'topic'
-  const isInfluencer = node.group === 'influencer'
-  const radius = isTopic ? 17 : isInfluencer ? 9 : 4.5
-
+  const radius = node.val === 25 ? 15 : 5
   ctx.save()
   ctx.translate(node.x, node.y)
 
-  if (isTopic) {
+  if (node.val === 25) {
     ctx.beginPath()
     ctx.arc(0, 0, radius + 10, 0, Math.PI * 2)
-    ctx.strokeStyle = 'rgba(246, 200, 110, 0.17)'
-    ctx.lineWidth = 2
-    ctx.shadowBlur = 20
-    ctx.shadowColor = node.color
+    ctx.strokeStyle = 'rgba(255, 190, 11, 0.2)'
+    ctx.lineWidth = 3
+    ctx.shadowBlur = 28
+    ctx.shadowColor = '#FFBE0B'
     ctx.stroke()
-
-    ctx.beginPath()
-    ctx.arc(0, 0, radius + 5, 0, Math.PI * 2)
-    ctx.strokeStyle = 'rgba(255, 237, 178, 0.55)'
-    ctx.lineWidth = 1.5
-    ctx.shadowBlur = 20
-    ctx.shadowColor = node.color
-    ctx.stroke()
-
-    ctx.beginPath()
-    ctx.arc(0, 0, radius, 0, Math.PI * 2)
-    ctx.fillStyle = '#f6c86e'
-    ctx.shadowBlur = 20
-    ctx.shadowColor = node.color
-    ctx.fill()
-
-    ctx.beginPath()
-    ctx.arc(-radius * 0.28, -radius * 0.3, radius * 0.55, 0, Math.PI * 2)
-    ctx.fillStyle = 'rgba(255, 250, 218, 0.72)'
-    ctx.shadowBlur = 0
-    ctx.fill()
-  } else {
-    ctx.beginPath()
-    ctx.arc(0, 0, radius + (isInfluencer ? 5 : 2.5), 0, Math.PI * 2)
-    ctx.setLineDash(isInfluencer ? [2, 3] : [])
-    ctx.strokeStyle = isInfluencer ? `${node.color}b8` : `${node.color}8c`
-    ctx.lineWidth = isInfluencer ? 1.6 : 1
-    ctx.shadowBlur = 20
-    ctx.shadowColor = node.color
-    ctx.stroke()
-
-    ctx.beginPath()
-    ctx.arc(0, 0, radius, 0, Math.PI * 2)
-    ctx.setLineDash([])
-    ctx.fillStyle = node.color
-    ctx.shadowBlur = 20
-    ctx.shadowColor = node.color
-    ctx.fill()
-
-    ctx.beginPath()
-    ctx.arc(-radius * 0.25, -radius * 0.3, radius * 0.34, 0, Math.PI * 2)
-    ctx.fillStyle = 'rgba(225, 255, 249, 0.62)'
-    ctx.shadowBlur = 0
-    ctx.fill()
   }
 
-  if ((isTopic || isInfluencer) && globalScale > 0.58) {
-    const fontSize = Math.max(8 / globalScale, 3)
-    ctx.font = `${isTopic ? 600 : 500} ${fontSize}px DM Sans, sans-serif`
+  ctx.beginPath()
+  ctx.arc(0, 0, radius + (node.val === 25 ? 7 : 3), 0, Math.PI * 2)
+  ctx.strokeStyle = node.val === 25 ? 'rgba(255, 215, 0, 0.7)' : `${node.color}66`
+  ctx.lineWidth = node.val === 25 ? 2 : 1
+  ctx.shadowBlur = node.val === 25 ? 22 : 12
+  ctx.shadowColor = node.color
+  ctx.stroke()
+
+  ctx.beginPath()
+  ctx.arc(0, 0, radius, 0, Math.PI * 2)
+  ctx.fillStyle = node.color
+  ctx.shadowBlur = node.val === 25 ? 18 : 10
+  ctx.fill()
+
+  if (globalScale > 0.55) {
+    const label = String(node.name).replace(/\s+/g, ' ').slice(0, 48)
+    ctx.font = `${node.val === 25 ? 600 : 500} ${Math.max((node.val === 25 ? 10 : 8) / globalScale, 3)}px DM Sans, sans-serif`
     ctx.textAlign = 'center'
     ctx.textBaseline = 'top'
-    ctx.fillStyle = isTopic ? '#fff1bc' : '#d9eee8'
+    ctx.fillStyle = '#e9f4f1'
     ctx.shadowBlur = 0
-    ctx.fillText(node.label, 0, radius + (isTopic ? 13 : 9) / globalScale)
+    ctx.fillText(label, 0, radius + 8 / globalScale)
   }
 
   ctx.restore()
 }
 
 export default function InfluenceGraph({ network }) {
-  const graphRef = useRef(null)
+  const fgRef = useRef(null)
   const containerRef = useRef(null)
   const [size, setSize] = useState({ width: 760, height: 430 })
-  const graphData = useMemo(() => createGraphData(network), [network])
+  const graphData = useMemo(() => createHubAndSpokeData(network), [network])
 
   useEffect(() => {
     if (!containerRef.current) return undefined
@@ -115,23 +98,20 @@ export default function InfluenceGraph({ network }) {
   }, [])
 
   useEffect(() => {
-    const graph = graphRef.current
-    if (!graph) return
+    const graph = fgRef.current
+    if (!graph || !graphData.nodes.length) return
 
-    const charge = graph.d3Force('charge')
-    if (charge) {
-      charge.strength(-600)
-      charge.distanceMax(900)
-    }
-
-    const link = graph.d3Force('link')
-    if (link) {
-      // Fixed: ID was mismatched. Now strictly checks for topic_center.
-      link.distance((edge) => (edge.source.id === 'topic_center' ? 170 : 105))
-    }
-
+    graph.d3Force('charge', forceManyBody().strength(-200))
+    graph.d3Force(
+      'collide',
+      forceCollide().radius(node => Math.sqrt(node.val) * 8 + 5)
+    )
+    graph.d3Force(
+      'link',
+      forceLink().id(node => node.id).distance(80)
+    )
     graph.d3ReheatSimulation()
-  }, [])
+  }, [graphData])
 
   return (
     <div
@@ -145,48 +125,39 @@ export default function InfluenceGraph({ network }) {
       }}
     >
       <ForceGraph2D
-        ref={graphRef}
+        ref={fgRef}
         graphData={graphData}
         width={size.width}
         height={size.height}
         backgroundColor="rgba(0, 0, 0, 0)"
         nodeCanvasObject={drawNode}
-        
-        // This is the magic fix that forces the hit-boxes to align with the visual nodes:
+        nodeVal="val"
+        nodeColor="color"
         nodePointerAreaPaint={(node, color, ctx) => {
-          const isTopic = node.group === 'topic'
-          const isInfluencer = node.group === 'influencer'
-          const radius = isTopic ? 17 : isInfluencer ? 9 : 4.5
+          const radius = node.val === 25 ? 24 : 12
           ctx.fillStyle = color
           ctx.beginPath()
-          // Drawing exactly at node.x / node.y on the hidden interaction canvas
-          ctx.arc(node.x, node.y, radius + 10, 0, 2 * Math.PI, false)
+          ctx.arc(node.x, node.y, radius, 0, Math.PI * 2)
           ctx.fill()
         }}
-
         enableNodeDrag={true}
-        onNodeDragEnd={(node) => {
-          node.fx = node.x
-          node.fy = node.y
+        onNodeDragEnd={node => {
+          node.fx = null
+          node.fy = null
         }}
-        nodeLabel={(node) => `${node.label} · ${node.group}`}
-        linkColor={() => 'rgba(255, 255, 255, 0.1)'}
-        linkWidth={0.7}
-        linkDirectionalParticles={2}
-        linkDirectionalParticleWidth={1.5}
-        linkDirectionalParticleColor={() => 'rgba(255, 255, 255, 0.8)'}
-        linkDirectionalParticleSpeed={0.004}
+        nodeLabel={node => node.name}
+        linkColor={() => 'rgba(255, 255, 255, 0.2)'}
+        linkWidth={0.8}
+        linkDirectionalParticles={1}
+        linkDirectionalParticleWidth={1.2}
+        linkDirectionalParticleColor={() => 'rgba(11, 219, 180, 0.65)'}
+        linkDirectionalParticleSpeed={0.002}
         d3AlphaDecay={0.018}
-        d3VelocityDecay={0.24}
-        cooldownTicks={180}
+        d3VelocityDecay={0.28}
+        cooldownTicks={Infinity}
         enableZoomInteraction
         enablePanInteraction
       />
-      <div className="graph-legend" style={{ pointerEvents: 'none' }}>
-        <span><i className="legend-topic" /> Viral topic</span>
-        <span><i className="legend-influencer" /> Primary influencers</span>
-        <span><i className="legend-follower" /> Followers</span>
-      </div>
     </div>
   )
 }
